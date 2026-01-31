@@ -131,14 +131,14 @@ namespace plume
 #ifdef MARATHON_RECOMP_METAL
 extern std::unique_ptr<RenderInterface> CreateMetalInterface();
 #endif
-#ifdef SDL_VULKAN_ENABLED
+#ifdef PLUME_SDL_VULKAN_ENABLED
     extern std::unique_ptr<RenderInterface> CreateVulkanInterface(RenderWindow sdlWindow);
 #else
     extern std::unique_ptr<RenderInterface> CreateVulkanInterface();
 #endif
 
     static std::unique_ptr<RenderInterface> CreateVulkanInterfaceWrapper() {
-#ifdef SDL_VULKAN_ENABLED
+#ifdef PLUME_SDL_VULKAN_ENABLED
         return CreateVulkanInterface(GameWindow::s_renderWindow);
 #else
         return CreateVulkanInterface();
@@ -361,6 +361,10 @@ static Mutex g_copyMutex;
 static std::unique_ptr<RenderCommandQueue> g_copyQueue;
 static std::unique_ptr<RenderCommandList> g_copyCommandList;
 static std::unique_ptr<RenderCommandFence> g_copyCommandFence;
+
+static Mutex g_discardMutex;
+static std::unique_ptr<RenderCommandList> g_discardCommandList;
+static std::unique_ptr<RenderCommandFence> g_discardCommandFence;
 
 static std::unique_ptr<RenderSwapChain> g_swapChain;
 static bool g_swapChainValid;
@@ -1576,8 +1580,6 @@ static void CreateImGuiBackend()
 #endif
 
     InitImGuiUtils();
-    AchievementMenu::Init();
-    AchievementOverlay::Init();
     OptionsMenu::Init();
     InstallerWizard::Init();
 
@@ -1913,22 +1915,9 @@ bool Video::CreateHostDevice(const char *sdlVideoDriver, bool graphicsApiRetry)
                     {
                         bool redirectToVulkan = false;
 
-                        if (deviceDescription.vendor == RenderDeviceVendor::AMD)
-                        {
-                            // AMD Drivers before this version have a known issue where MSAA resolve targets will fail to work correctly.
-                            // If no specific graphics API was selected, we silently destroy this one and move to the next option as it'll
-                            // just work incorrectly otherwise and result in visual glitches and 3D rendering not working in general.
-                            constexpr uint64_t MinimumAMDDriverVersion = 0x1F00005DC2005CULL; // 31.0.24002.92
-                            if ((Config::GraphicsAPI == EGraphicsAPI::Auto) && (deviceDescription.driverVersion < MinimumAMDDriverVersion))
-                                redirectToVulkan = true;
-                        }
-                        else if (deviceDescription.vendor == RenderDeviceVendor::INTEL)
-                        {
-                            // Intel drivers on D3D12 are extremely buggy, introducing various graphical glitches.
-                            // We will redirect users to Vulkan until a workaround can be found.
-                            if (Config::GraphicsAPI == EGraphicsAPI::Auto)
-                                redirectToVulkan = true;
-                        }
+                        // ...
+                        // There used to be driver redirections here, but they are all free from Vulkan purgatory for now...
+                        // ...
 
                         if (redirectToVulkan)
                         {
@@ -2036,6 +2025,12 @@ bool Video::CreateHostDevice(const char *sdlVideoDriver, bool graphicsApiRetry)
     g_copyCommandList = g_copyQueue->createCommandList();
     g_copyCommandFence = g_device->createCommandFence();
 
+    if (g_backend == Backend::D3D12)
+    {
+        g_discardCommandList = g_queue->createCommandList();
+        g_discardCommandFence = g_device->createCommandFence();
+    }
+
     uint32_t bufferCount = 2;
 
     switch (Config::TripleBuffering)
@@ -2064,7 +2059,14 @@ bool Video::CreateHostDevice(const char *sdlVideoDriver, bool graphicsApiRetry)
         break;
     }
 
-    g_swapChain = g_queue->createSwapChain(GameWindow::s_renderWindow, bufferCount, BACKBUFFER_FORMAT, Config::MaxFrameLatency);
+    RenderSwapChainDesc swapChainDesc;
+    swapChainDesc.renderWindow = GameWindow::s_renderWindow;
+    swapChainDesc.textureCount = bufferCount;
+    swapChainDesc.format = BACKBUFFER_FORMAT;
+    swapChainDesc.maxFrameLatency = Config::MaxFrameLatency;
+    swapChainDesc.enablePresentWait = g_capabilities.presentWait;
+
+    g_swapChain = g_queue->createSwapChain(swapChainDesc);
     g_swapChain->setVsyncEnabled(Config::VSync);
     g_swapChainValid = !g_swapChain->needsResize();
 
@@ -2311,17 +2313,17 @@ static uint32_t getSetAddress(uint32_t base, int index) {
 static uint32_t CreateDevice(uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4, uint32_t a5, be<uint32_t>* a6)
 {
     LOGF_WARNING("{:p} {:p} {:p} {:p} {:p} {:p}\n", reinterpret_cast<void*>(a1), reinterpret_cast<void*>(a2), reinterpret_cast<void*>(a3), reinterpret_cast<void*>(a4), reinterpret_cast<void*>(a5), reinterpret_cast<void*>(a6));
-    g_xdbfTextureCache = std::unordered_map<uint16_t, GuestTexture *>();
+    
+    g_xdbfTextureCache = std::unordered_map<uint16_t, GuestTexture*>();
 
-    // for (auto &achievement : g_xdbfWrapper.GetAchievements(XDBF_LANGUAGE_ENGLISH))
-    // {
-    //     // huh?
-    //     if (!achievement.pImageBuffer || !achievement.ImageBufferSize)
-    //         continue;
+    for (auto &achievement : g_xdbfWrapper.GetAchievements(XDBF_LANGUAGE_ENGLISH))
+    {
+        if (!achievement.pImageBuffer || !achievement.ImageBufferSize)
+            continue;
 
-    //     g_xdbfTextureCache[achievement.ID] =
-    //         LoadTexture((uint8_t *)achievement.pImageBuffer, achievement.ImageBufferSize).release();
-    // }
+        g_xdbfTextureCache[achievement.ID] =
+            LoadTexture((uint8_t *)achievement.pImageBuffer, achievement.ImageBufferSize).release();
+    }
 
     // Move backbuffer to guest memory.
     assert(!g_memory.IsInMemoryRange(g_backBuffer) && g_backBufferHolder != nullptr);
@@ -2915,10 +2917,10 @@ static void DrawImGui()
 
     AchievementMenu::Draw();
     OptionsMenu::Draw();
-    AchievementOverlay::Draw();
     InstallerWizard::Draw();
     ButtonWindow::Draw();
     MessageWindow::Draw();
+    AchievementOverlay::Draw();
     Fader::Draw();
     BlackBar::Draw();
 
@@ -3400,6 +3402,27 @@ static RenderFormat ConvertFormat(uint32_t format)
     }
 }
 
+static void DiscardTexture(GuestBaseTexture* texture, RenderTextureLayout layout)
+{
+    if (g_backend == Backend::D3D12)
+    {
+        std::lock_guard lock(g_discardMutex);
+
+        g_discardCommandList->begin();
+        if (texture->layout != layout)
+        {
+            g_discardCommandList->barriers(RenderBarrierStage::GRAPHICS, RenderTextureBarrier(texture->texture, layout));
+            texture->layout = layout;
+        }
+
+        g_discardCommandList->discardTexture(texture->texture);
+        g_discardCommandList->end();
+
+        g_queue->executeCommandLists(g_discardCommandList.get(), g_discardCommandFence.get());
+        g_queue->waitForCommandFence(g_discardCommandFence.get());
+    }
+}
+
 static GuestTexture* CreateTexture(uint32_t width, uint32_t height, uint32_t depth, uint32_t levels, uint32_t usage, uint32_t format, uint32_t pool, uint32_t type) 
 {
     ResourceType resourceType;
@@ -3474,10 +3497,17 @@ static GuestTexture* CreateTexture(uint32_t width, uint32_t height, uint32_t dep
     texture->descriptorIndex = g_textureDescriptorAllocator.allocate();
 
     g_textureDescriptorSet->setTexture(texture->descriptorIndex, texture->texture, RenderTextureLayout::SHADER_READ, texture->textureView.get());
-   
+
 #ifdef _DEBUG 
     texture->texture->setName(fmt::format("Texture {:X}", g_memory.MapVirtual(texture)));
 #endif
+
+    if (desc.flags != RenderTextureFlag::NONE)
+    {
+        DiscardTexture(texture, desc.flags == RenderTextureFlag::RENDER_TARGET ?
+            RenderTextureLayout::COLOR_WRITE : RenderTextureLayout::DEPTH_WRITE);
+    }
+
     // printf("CreateTexture: w: %d, h: %d, depth: %d, levels: %d, usage: %d, format: %d, pool: %d, type: %d - %x\n", width, height, depth, levels, usage, format, pool, type, texture);
     return texture;
 }
@@ -3573,6 +3603,10 @@ static GuestSurface* CreateSurface(uint32_t width, uint32_t height, uint32_t for
     #ifdef _DEBUG 
         surface->texture->setName(fmt::format("{} {:X}", desc.flags & RenderTextureFlag::RENDER_TARGET ? "Render Target" : "Depth Stencil", g_memory.MapVirtual(surface)));
     #endif
+
+        DiscardTexture(surface, desc.flags == RenderTextureFlag::RENDER_TARGET ?
+            RenderTextureLayout::COLOR_WRITE : RenderTextureLayout::DEPTH_WRITE);
+
         if (params) {
             surface->wasCached = true;
             g_surfaceCache.emplace_back(surface, baseValue);

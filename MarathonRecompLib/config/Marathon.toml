@@ -497,12 +497,6 @@ name = "Spanverse_GE1PE_DeltaTimeFix"
 address = 0x82670728
 registers = ["f1"]
 
-# Sonicteam::Spanverse::SpangleObject / Sonicteam::Spanverse::SpkCustomObject
-[[midasm_hook]]
-name = "Spanverse_GE1PE_DeltaTimeFix"
-address = 0x8266A580
-registers = ["f31"]
-
 # Sonicteam::Spanverse::SpangleParticle
 [[midasm_hook]]
 name = "Spanverse_GE1PE_DeltaTimeFix"
@@ -731,3 +725,18 @@ jump_address_on_true = 0x8226AB70
 name = "InfiniteLives"
 address = 0x821857B0
 jump_address_on_true = 0x821857B4
+
+[[midasm_hook]]
+name = "UnlockAchievement"
+address = 0x825B0960
+registers = ["r29"]
+
+[[midasm_hook]]
+name = "HUDGoldMedal_ShouldDestroyTable"
+address = 0x824D6720
+jump_address_on_false = 0x824D6724
+
+[[midasm_hook]]
+name = "MainMenuTask_GoldMedalResults_SkipOutro"
+address = 0x82502E14
+jump_address_on_true = 0x82502E90
